@@ -26,8 +26,11 @@ MAX_FUNDING_RATE = float(os.getenv("MAX_FUNDING_RATE", "-0.01"))
 # |Futures - Spot| / Spot <= 2% → справедливая цена
 MAX_PRICE_SPREAD = float(os.getenv("MAX_PRICE_SPREAD", "2.0"))
 
-# Market Cap <= $5M → лоукап
-MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "5000000"))
+# Market Cap >= $3M → не скам/мертвый проект
+MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "3000000"))
+
+# Market Cap верхний лимит (0 = без лимита)
+MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "0"))
 
 # ═══════════════════════════════════════════
 # Биржи
@@ -46,9 +49,9 @@ EXCHANGES = [
 # ═══════════════════════════════════════════
 # Сканирование
 # ═══════════════════════════════════════════
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))  # секунды между циклами
-MCAP_CACHE_TTL = int(os.getenv("MCAP_CACHE_TTL", "300"))  # кэш маркеткапов, сек
-SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1800"))  # не алертить одну монету чаще 30 мин
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
+MCAP_CACHE_TTL = int(os.getenv("MCAP_CACHE_TTL", "300"))
+SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1800"))
 
 # CoinGecko
-COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")  # опционально, для Pro
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")

@@ -1,6 +1,6 @@
 """
 scanner.py — Ядро стратегии «Таблетка от бедности»
-Точный скоринг и фильтрация по 4 факторам
+Точный скоринг с диагностикой на каждом этапе фильтрации
 """
 import math
 import time
@@ -15,23 +15,19 @@ logger = logging.getLogger("oi_scanner")
 
 @dataclass(slots=True)
 class Signal:
-    """Сигнал на лонг — все 4 фактора совпали"""
+    """Сигнал на лонг"""
     exchange: str
     exchange_name: str
     symbol: str
     base: str
     futures_price: float
     spot_price: Optional[float]
-
-    # Факторы
     oi_usd: float
     mcap: float
-    oi_mcap_ratio: float  # %
-    funding_rate: float   # %
-    price_spread: Optional[float]  # %
-
-    # Score
-    score: int  # 0-100
+    oi_mcap_ratio: float
+    funding_rate: float
+    price_spread: Optional[float]
+    score: int
     factor_scores: Dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
@@ -45,58 +41,44 @@ class Signal:
 
     @property
     def spread_str(self) -> str:
-        if self.price_spread is not None:
-            return f"{self.price_spread:+.2f}%"
-        return "N/A"
+        return f"{self.price_spread:+.2f}%" if self.price_spread is not None else "N/A"
 
     @property
     def mcap_str(self) -> str:
+        if self.mcap >= 1e9:
+            return f"${self.mcap / 1e9:.1f}B"
         if self.mcap >= 1e6:
-            return f"${self.mcap / 1e6:.2f}M"
-        if self.mcap >= 1e3:
-            return f"${self.mcap / 1e3:.0f}K"
-        return f"${self.mcap:.0f}"
+            return f"${self.mcap / 1e6:.1f}M"
+        return f"${self.mcap / 1e3:.0f}K"
 
 
 class StrategyScanner:
-    """
-    Сканер стратегии с **непрерывным** скорингом.
-    
-    В отличие от дискретных шкал, используем:
-    - Логарифмические кривые для OI/MCap и MCap (более точное отражение)
-    - Линейную интерполяцию для funding и spread
-    - Бонус за экстремальные значения
-    """
+    """Сканер с диагностикой"""
 
     def __init__(self):
-        self._cooldowns: Dict[str, float] = {}  # key → timestamp
+        self._cooldowns: Dict[str, float] = {}
         self.signals_generated = 0
         self.coins_scanned = 0
         self.coins_passed_filter = 0
+        # Диагностика: на каком этапе отсеиваются
+        self._diag = {"no_mcap": 0, "mcap_low": 0, "mcap_high": 0,
+                       "oi_low": 0, "funding_high": 0, "spread_high": 0,
+                       "cooldown": 0, "passed": 0}
 
     def evaluate_batch(self, all_data: Dict[str, Dict], mcap_lookup: Dict[str, float]) -> List[Signal]:
-        """
-        Оценить сразу пачку монет (результат ExchangeManager.fetch_all_data).
-        Значительно быстрее чем по-одному.
-        
-        Returns:
-            Список сигналов, отсортированный по score DESC
-        """
+        """Оценить пачку монет, вернуть сигналы отсортированные по score"""
         signals = []
         for symbol, coin_data in all_data.items():
             base = coin_data["base"]
             mcap = mcap_lookup.get(base.upper())
-            
             signal = self._evaluate_one(coin_data, mcap)
             if signal:
                 signals.append(signal)
 
-        # Сортируем по score (лучшие первые)
         signals.sort(key=lambda s: s.score, reverse=True)
         return signals
 
     def _evaluate_one(self, coin_data: Dict, mcap: Optional[float]) -> Optional[Signal]:
-        """Оценить одну монету по 4 факторам"""
         self.coins_scanned += 1
 
         base = coin_data["base"]
@@ -105,38 +87,49 @@ class StrategyScanner:
         futures_price = coin_data["futures_price"]
         spot_price = coin_data.get("spot_price")
 
-        # ──── Фактор 4: ЛОУКАП (быстрый фильтр) ────
+        # ──── MCap фильтр ────
         if mcap is None or mcap <= 0:
-            return None
-        if mcap > config.MAX_MARKET_CAP:
+            self._diag["no_mcap"] += 1
             return None
 
-        # ──── Фактор 1: ПЕРЕГРЕТЫЙ OI ────
+        if mcap < config.MIN_MARKET_CAP:
+            self._diag["mcap_low"] += 1
+            return None
+
+        if config.MAX_MARKET_CAP > 0 and mcap > config.MAX_MARKET_CAP:
+            self._diag["mcap_high"] += 1
+            return None
+
+        # ──── OI/MCap ────
         oi_mcap_ratio = (oi_usd / mcap) * 100
         if oi_mcap_ratio < config.OI_MCAP_RATIO:
+            self._diag["oi_low"] += 1
             return None
 
-        # ──── Фактор 2: ОТРИЦАТЕЛЬНЫЙ ФАНДИНГ ────
+        # ──── Funding ────
         if funding_rate > config.MAX_FUNDING_RATE:
+            self._diag["funding_high"] += 1
             return None
 
-        # ──── Фактор 3: СПРАВЕДЛИВАЯ ЦЕНА ────
+        # ──── Spread ────
         price_spread = None
         if spot_price and spot_price > 0:
             price_spread = ((futures_price - spot_price) / spot_price) * 100
             if abs(price_spread) > config.MAX_PRICE_SPREAD:
+                self._diag["spread_high"] += 1
                 return None
 
-        # ──── ВСЕ 4 ФАКТОРА СОВПАЛИ 💊 ────
+        # ──── ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ 💊 ────
+        self._diag["passed"] += 1
         self.coins_passed_filter += 1
 
-        # Cooldown check
+        # Cooldown
         cooldown_key = f"{base}_{coin_data['exchange']}"
         now = time.time()
         if (now - self._cooldowns.get(cooldown_key, 0)) < config.SIGNAL_COOLDOWN:
+            self._diag["cooldown"] += 1
             return None
 
-        # Score
         score, factor_scores = self._calculate_score(oi_mcap_ratio, funding_rate, price_spread, mcap)
 
         self._cooldowns[cooldown_key] = now
@@ -158,34 +151,18 @@ class StrategyScanner:
             factor_scores=factor_scores,
         )
 
-    def _calculate_score(
-        self,
-        oi_mcap_ratio: float,
-        funding_rate: float,
-        price_spread: Optional[float],
-        mcap: float,
-    ) -> tuple:
-        """
-        Непрерывный скоринг 0-100.
-        
-        Каждый фактор: 0-25 баллов.
-        Используем log-кривые для более точной оценки:
-        - OI/MCap: log-рост, насыщение при ~100%
-        - Funding: линейный, бонус при extreme
-        - Spread: чем ближе к 0 — тем лучше
-        - MCap: log-убывание (меньше = лучше)
-        """
+    def _calculate_score(self, oi_mcap_ratio: float, funding_rate: float,
+                         price_spread: Optional[float], mcap: float) -> tuple:
+        """Непрерывный скоринг 0-100"""
         factor_scores = {}
 
-        # 1. OI/MCap (0-25) — логарифмический рост
-        # 25% (порог) → 12, 50% → 18, 100%+ → 24
+        # 1. OI/MCap (0-25) — лог-рост
         threshold = config.OI_MCAP_RATIO
-        ratio_normalized = oi_mcap_ratio / threshold  # 1.0 = порог
-        oi_score = min(25.0, 12.0 * math.log2(1 + ratio_normalized))
+        ratio_norm = oi_mcap_ratio / threshold
+        oi_score = min(25.0, 12.0 * math.log2(1 + ratio_norm))
         factor_scores["oi"] = round(oi_score, 1)
 
-        # 2. Funding (0-25) — линейный + бонус за extreme
-        # -0.01% → 10, -0.05% → 18, -0.1% → 22, -0.5%+ → 25
+        # 2. Funding (0-25)
         abs_fund = abs(funding_rate)
         if abs_fund >= 0.5:
             fund_score = 25.0
@@ -199,33 +176,49 @@ class StrategyScanner:
             fund_score = abs_fund / 0.01 * 10.0
         factor_scores["funding"] = round(min(25.0, fund_score), 1)
 
-        # 3. Spread (0-25) — чем ближе к 0, тем лучше
+        # 3. Spread (0-25)
         if price_spread is not None:
             abs_spread = abs(price_spread)
             max_spread = config.MAX_PRICE_SPREAD
-            # 0% → 25, MAX/2 → 15, MAX → 5
             spread_score = max(0.0, 25.0 * (1.0 - (abs_spread / max_spread) ** 0.7))
-            factor_scores["spread"] = round(spread_score, 1)
         else:
-            spread_score = 10.0  # Нет споте — нейтрально
-            factor_scores["spread"] = 10.0
+            spread_score = 10.0
+        factor_scores["spread"] = round(spread_score, 1)
 
-        # 4. MCap (0-25) — логарифмическое убывание (меньше = лучше)
-        # $100K → 25, $500K → 22, $1M → 18, $5M → 10
-        max_cap = config.MAX_MARKET_CAP
-        if mcap <= 0:
+        # 4. MCap (0-25) — меньше = лучше
+        # $3M = 25, $20M = 18, $100M = 12, $1B = 5
+        if mcap <= config.MIN_MARKET_CAP:
             mcap_score = 25.0
         else:
-            # log-шкала: чем меньше mcap, тем выше score
-            ratio = mcap / max_cap  # 0..1
-            mcap_score = max(0.0, 25.0 * (1.0 - math.log10(1 + ratio * 9) / math.log10(10)))
+            mcap_score = max(0.0, 25.0 - 4.0 * math.log10(mcap / config.MIN_MARKET_CAP))
         factor_scores["mcap"] = round(min(25.0, mcap_score), 1)
 
         total = oi_score + fund_score + spread_score + mcap_score
         return (max(0, min(100, int(total))), factor_scores)
 
+    def get_diagnostics(self) -> str:
+        """Строковая диагностика фильтров"""
+        d = self._diag
+        total = self.coins_scanned
+        if total == 0:
+            return "Нет данных"
+        return (
+            f"Всего: {total} | "
+            f"Нет MCap: {d['no_mcap']} | "
+            f"MCap<min: {d['mcap_low']} | "
+            f"MCap>max: {d['mcap_high']} | "
+            f"OI<порог: {d['oi_low']} | "
+            f"Fund>порог: {d['funding_high']} | "
+            f"Спред>порог: {d['spread_high']} | "
+            f"Cooldown: {d['cooldown']} | "
+            f"💊 Прошли: {d['passed']}"
+        )
+
+    def reset_diagnostics(self):
+        for k in self._diag:
+            self._diag[k] = 0
+
     def cleanup_cooldowns(self):
-        """Убрать устаревшие cooldown записи"""
         now = time.time()
         expired = [k for k, t in self._cooldowns.items() if (now - t) > config.SIGNAL_COOLDOWN * 2]
         for k in expired:

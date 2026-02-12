@@ -1,9 +1,6 @@
 """
 OI Scanner Bot — Таблетка от бедности 💊
-Главный модуль: параллельное сканирование, умная фильтрация
-
-Стратегия на ЛОНГ:
-  Перегретый OI + Отрицательный фандинг + Справедливая цена + Лоукап
+Параллельное сканирование с диагностикой
 
 Запуск: python main.py
 """
@@ -18,9 +15,7 @@ from marketcap import MarketCapProvider
 from scanner import StrategyScanner
 from telegram_bot import TelegramNotifier
 
-# ═══════════════════════════════════════════
-# Logging
-# ═══════════════════════════════════════════
+# ═══════════════ Logging ═══════════════
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s │ %(levelname)-7s │ %(message)s",
@@ -28,31 +23,15 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("oi_scanner")
-
-# Suppress noise
 for noisy in ("ccxt", "httpx", "httpcore", "telegram", "aiohttp", "urllib3"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 class OIScannerBot:
-    """
-    Главный класс — оркестрирует сканирование.
-    
-    Оптимизации:
-    - Pre-filter: сначала находим лоукапы, потом запрашиваем OI только для них
-    - Параллельное сканирование бирж через asyncio.gather
-    - Batch evaluate по результатам
-    - Фоновое обновление маркеткапов
-    """
-
     def __init__(self):
-        # gateio — правильный ID в ccxt (не "gate")
         exchange_ids = []
         for eid in config.EXCHANGES:
-            if eid == "gate":
-                exchange_ids.append("gateio")
-            else:
-                exchange_ids.append(eid)
+            exchange_ids.append("gateio" if eid == "gate" else eid)
 
         self.exchange_mgr = ExchangeManager(exchange_ids)
         self.mcap_provider = MarketCapProvider(
@@ -74,15 +53,11 @@ class OIScannerBot:
         logger.info("  💊 OI Scanner Bot — Таблетка от бедности")
         logger.info("═" * 52)
 
-        # Validate config
-        if not config.TELEGRAM_BOT_TOKEN:
-            logger.error("❌ TELEGRAM_BOT_TOKEN не задан в .env!")
-            return
-        if not config.TELEGRAM_CHAT_ID:
-            logger.error("❌ TELEGRAM_CHAT_ID не задан в .env!")
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+            logger.error("❌ TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не задан!")
             return
 
-        # 1. Биржи (параллельно)
+        # 1. Биржи
         logger.info("📡 Подключение к биржам...")
         await self.exchange_mgr.initialize()
 
@@ -92,23 +67,27 @@ class OIScannerBot:
             return
 
         total_pairs = sum(len(self.exchange_mgr.get_futures_symbols(e)) for e in connected)
-        logger.info(f"📊 Всего фьючерсных пар: {total_pairs}")
 
-        # 2. Маркеткапы (async)
+        # 2. Маркеткапы
         logger.info("💎 Загрузка маркеткапов...")
         await self.mcap_provider.refresh_cache()
 
+        eligible = self.mcap_provider.get_eligible_symbols()
+        logger.info(f"🎯 Монет с MCap ≥ ${config.MIN_MARKET_CAP/1e6:.0f}M: {len(eligible)}")
+
         # 3. Telegram
-        logger.info("📱 Запуск Telegram...")
         await self.telegram.initialize()
         self.telegram.set_refs(self.scanner, self.exchange_mgr, self.mcap_provider)
         await self.telegram.send_startup_message(len(connected), total_pairs)
 
-        # 4. Config summary
+        # 4. Конфиг
         logger.info("")
+        cap_str = f"${config.MIN_MARKET_CAP/1e6:.0f}M+"
+        if config.MAX_MARKET_CAP > 0:
+            cap_str += f" (макс ${config.MAX_MARKET_CAP/1e6:.0f}M)"
         logger.info(f"⚙️  OI/MCap ≥ {config.OI_MCAP_RATIO}% | Funding ≤ {config.MAX_FUNDING_RATE}%")
-        logger.info(f"⚙️  Спред ≤ ±{config.MAX_PRICE_SPREAD}% | MCap ≤ ${config.MAX_MARKET_CAP/1e6:.0f}M")
-        logger.info(f"⚙️  Интервал: {config.SCAN_INTERVAL}с | Cooldown: {config.SIGNAL_COOLDOWN}с")
+        logger.info(f"⚙️  Спред ≤ ±{config.MAX_PRICE_SPREAD}% | MCap: {cap_str}")
+        logger.info(f"⚙️  Интервал: {config.SCAN_INTERVAL}с")
         logger.info("")
         logger.info("🔍 Начинаю сканирование...\n")
 
@@ -122,95 +101,76 @@ class OIScannerBot:
                 import traceback
                 traceback.print_exc()
 
-            # Interruptible sleep
             for _ in range(config.SCAN_INTERVAL):
                 if not self._running:
                     break
                 await asyncio.sleep(1)
 
     async def _scan_cycle(self):
-        """
-        Один цикл сканирования.
-        
-        Порядок (оптимизирован):
-        1. Обновить маркеткапы если устарели
-        2. Получить множество лоукап-символов (O(1) lookup)
-        3. Для каждой биржи ПАРАЛЛЕЛЬНО:
-           a. Batch-загрузить тикеры + фандинги + OI
-           b. Batch-оценить все монеты
-        4. Отправить сигналы
-        """
         self._cycle += 1
         t0 = time.time()
-        cycle_signals = 0
 
         logger.info(f"━━━ Цикл #{self._cycle} ━━━━━━━━━━━━━━━━━━━")
 
-        # 1. Refresh маркеткапов (если кэш протух)
+        # Refresh маркеткапов
         if self.mcap_provider.is_stale:
             await self.mcap_provider.refresh_cache()
 
-        # 2. Множество лоукапов для pre-filter
-        low_cap_set = self.mcap_provider.get_low_cap_symbols()
-        if not low_cap_set:
-            logger.warning("⚠️  Нет лоукапов в кэше, пропускаю цикл")
+        # Множество подходящих монет
+        eligible_symbols = self.mcap_provider.get_eligible_symbols()
+        if not eligible_symbols:
+            logger.warning("⚠️  Нет подходящих монет в кэше маркеткапов")
             return
 
-        # 3. Параллельное сканирование ВСЕХ бирж
+        # Сброс диагностики цикла
+        self.scanner.reset_diagnostics()
+
+        # Параллельное сканирование бирж
         exchanges = self.exchange_mgr.get_connected_exchanges()
 
         async def scan_one(eid: str):
-            """Сканировать одну биржу"""
             try:
-                # Batch-загрузка (3-4 HTTP запроса на всю биржу)
-                all_data = await self.exchange_mgr.fetch_all_data(eid, target_bases=low_cap_set)
-
+                all_data = await self.exchange_mgr.fetch_all_data(eid, target_bases=eligible_symbols)
                 if not all_data:
                     return []
-
-                # Batch-evaluate
-                mcap_lookup = {sym: cap for sym, cap in self.mcap_provider._cache.items()}
-                signals = self.scanner.evaluate_batch(all_data, mcap_lookup)
-                return signals
-
+                mcap_lookup = dict(self.mcap_provider._cache)
+                return self.scanner.evaluate_batch(all_data, mcap_lookup)
             except Exception as e:
-                logger.warning(f"⚠️  Ошибка {eid}: {e}")
+                logger.warning(f"⚠️  {eid}: {e}")
                 return []
 
-        # Запускаем все биржи параллельно
         results = await asyncio.gather(
             *[scan_one(eid) for eid in exchanges],
             return_exceptions=True,
         )
 
-        # 4. Обработка результатов и отправка сигналов
+        # Собираем сигналы
         all_signals = []
         for r in results:
             if isinstance(r, list):
                 all_signals.extend(r)
-
-        # Сортируем все сигналы по score
         all_signals.sort(key=lambda s: s.score, reverse=True)
 
+        # Отправляем
         for signal in all_signals:
             await self.telegram.send_signal(signal)
-            cycle_signals += 1
             self._total_signals += 1
 
-        # Cleanup cooldowns
+        # Cleanup
         if self._cycle % 10 == 0:
             self.scanner.cleanup_cooldowns()
 
         elapsed = time.time() - t0
-        stats = self.scanner.get_stats()
+
+        # ДИАГНОСТИКА — показываем на каком этапе отсеиваются монеты
+        diag = self.scanner.get_diagnostics()
+        logger.info(f"   📋 Фильтры: {diag}")
         logger.info(
             f"   ✅ Цикл #{self._cycle} за {elapsed:.1f}с | "
-            f"Проверено: {stats['coins_scanned']} | "
-            f"Сигналов: {cycle_signals} (всего: {self._total_signals})"
+            f"Сигналов: {len(all_signals)} (всего: {self._total_signals})"
         )
 
     async def stop(self):
-        logger.info("🛑 Останавливаю...")
         self._running = False
         await self.telegram.shutdown()
         await self.exchange_mgr.close()
