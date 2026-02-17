@@ -76,3 +76,6 @@ SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1200"))
 
 # CoinGecko
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
+
+# Dashboard
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8085"))

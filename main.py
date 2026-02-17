@@ -48,7 +48,7 @@ class OIScannerBot:
             topic_id=config.TELEGRAM_TOPIC_ID,
         )
         self.tracker = SignalTracker(max_signals=10)
-        self.dashboard = Dashboard(self.tracker)
+        self.dashboard = Dashboard(self.tracker, port=config.DASHBOARD_PORT)
         self._running = False
         self._cycle = 0
         self._total_signals = 0
