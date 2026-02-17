@@ -111,8 +111,8 @@ class ExchangeManager:
         name = self.EXCHANGE_NAMES.get(eid, eid)
         start = time.time()
 
-        # 1. Тикеры (batch)
-        tickers = await self._fetch_tickers_safe(eid)
+        # 1. Тикеры + объёмы (batch)
+        tickers, volumes = await self._fetch_tickers_safe(eid)
 
         # 2. Funding rates (batch/individual, с fallback)
         funding = await self._fetch_funding_safe(eid)
@@ -160,6 +160,9 @@ class ExchangeManager:
             # Funding: ОПЦИОНАЛЬНЫЙ!
             fr = funding.get(symbol)  # может быть None
 
+            # Volume 24h
+            vol = volumes.get(symbol, 0)
+
             matched += 1
             result[symbol] = {
                 "exchange": eid,
@@ -167,9 +170,10 @@ class ExchangeManager:
                 "symbol": symbol,
                 "base": base,
                 "oi_usd": oi,
-                "funding_rate": fr,  # может быть None
+                "funding_rate": fr,
                 "futures_price": price,
                 "spot_price": spot_prices.get(base),
+                "volume_24h": vol,
             }
 
         elapsed = time.time() - start
@@ -185,27 +189,35 @@ class ExchangeManager:
     # ТИКЕРЫ
     # ═══════════════════════════════════════════
 
-    async def _fetch_tickers_safe(self, eid: str) -> Dict[str, float]:
-        """Batch тикеры: {symbol: last_price}"""
+    async def _fetch_tickers_safe(self, eid: str) -> tuple:
+        """Batch тикеры: ({symbol: last_price}, {symbol: volume_24h_usd})"""
         exchange = self.exchanges.get(eid)
         if not exchange:
-            return {}
+            return {}, {}
         try:
             raw = await exchange.fetch_tickers()
-            out = {}
+            prices = {}
+            volumes = {}
             for sym, t in raw.items():
                 last = t.get("last")
                 if last is not None:
                     try:
                         val = float(last)
                         if val > 0:
-                            out[sym] = val
+                            prices[sym] = val
                     except (ValueError, TypeError):
                         pass
-            return out
+                # 24h volume в USDT (quoteVolume)
+                qv = t.get("quoteVolume")
+                if qv is not None:
+                    try:
+                        volumes[sym] = float(qv)
+                    except (ValueError, TypeError):
+                        pass
+            return prices, volumes
         except Exception as e:
             logger.warning(f"fetch_tickers {eid}: {e}")
-            return {}
+            return {}, {}
 
     # ═══════════════════════════════════════════
     # FUNDING RATES (с fallback)

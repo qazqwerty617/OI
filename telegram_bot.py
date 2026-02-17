@@ -130,39 +130,42 @@ class TelegramNotifier:
         else:
             header = "💊 СИГНАЛ НА ЛОНГ"
 
+        # Бэквордация?
+        backwardation = ""
+        if signal.price_spread is not None and signal.price_spread < -0.1:
+            backwardation = " 🔻BACKWARDATION"
+
         # Deep link
         link_tpl = EXCHANGE_LINKS.get(signal.exchange, "")
         trade_url = link_tpl.format(base=signal.base) if link_tpl else ""
 
-        # Factor bars (визуализация силы каждого фактора)
+        # Factor bars
         factor_bars = ""
         for key, label in [("oi", "OI/MCap"), ("funding", "Фандинг"), ("spread", "Спред"), ("mcap", "MCap")]:
             val = signal.factor_scores.get(key, 0)
-            filled = int(val / 25 * 5)  # 0-5 блоков
+            filled = int(val / 25 * 5)
             bar = "█" * filled + "░" * (5 - filled)
             emoji = FACTOR_EMOJI.get(key, "•")
             factor_bars += f"{emoji} {bar} {val}/25\n"
 
-        # Форматируем цену компактно
+        # Цена
         price = signal.futures_price
-        if price >= 1:
-            price_str = f"${price:,.4f}"
-        else:
-            price_str = f"${price:.6g}"
+        price_str = f"${price:,.4f}" if price >= 1 else f"${price:.6g}"
 
         lines = [
-            f"*{header}*",
+            f"*{header}*{backwardation}",
             f"*{signal.base}/USDT* — {signal.exchange_name}",
             "",
             f"🎯 *Score: {signal.score}/100*",
             "",
-            f"📊 OI/MCap: *{signal.oi_mcap_str}* (перегрет)",
-            f"📉 Funding: *{signal.funding_str}* (шорты платят)",
+            f"📊 OI/MCap: *{signal.oi_mcap_str}*",
+            f"📈 OI: *{signal.oi_str}*",
+            f"📉 Funding: *{signal.funding_str}*",
             f"⚖️ Спред: *{signal.spread_str}*",
             f"💎 MCap: *{signal.mcap_str}*",
+            f"📦 Volume 24h: *{signal.volume_str}*",
             "",
             f"💰 Цена: {price_str}",
-            f"📈 OI: ${signal.oi_usd:,.0f}",
             "",
             "```",
             factor_bars.rstrip(),
@@ -182,16 +185,23 @@ class TelegramNotifier:
         if not self.bot:
             return
 
+        cap_str = f"≥ ${config.MIN_MARKET_CAP/1e6:.0f}M"
+        if config.MAX_MARKET_CAP > 0:
+            cap_str += f" (макс ${config.MAX_MARKET_CAP/1e6:.0f}M)"
+
         text = (
             "🚀 *OI Scanner Bot запущен*\n\n"
             f"📡 Бирж: {exchanges}\n"
             f"🔍 Фьючерсных пар: {pairs}\n"
             f"⏱ Интервал: {config.SCAN_INTERVAL}с\n\n"
-            f"*Пороги:*\n"
+            f"*Фильтры:*\n"
             f"• OI/MCap ≥ {config.OI_MCAP_RATIO}%\n"
+            f"• OI ≥ ${config.MIN_OI_USD/1e3:.0f}K\n"
             f"• Funding ≤ {config.MAX_FUNDING_RATE}%\n"
             f"• Спред ≤ ±{config.MAX_PRICE_SPREAD}%\n"
-            f"• MCap ≤ ${config.MAX_MARKET_CAP/1e6:.0f}M\n\n"
+            f"• MCap {cap_str}\n"
+            f"• Volume ≥ ${config.MIN_VOLUME_24H/1e3:.0f}K\n"
+            f"• Score ≥ {config.MIN_SIGNAL_SCORE}\n\n"
             "💊 Сканирую..."
         )
         await self._send_with_retry(text)
@@ -210,7 +220,7 @@ class TelegramNotifier:
 
         if self._mcap_ref:
             ms = self._mcap_ref.get_stats()
-            lines.append(f"💎 MCap кэш: {ms['cached_coins']} монет | {ms['low_caps']} лоукапов")
+            lines.append(f"💎 MCap кэш: {ms['cached_coins']} монет | {ms['eligible']} подходящих")
 
         if self._scanner_ref:
             ss = self._scanner_ref.get_stats()
@@ -230,7 +240,7 @@ class TelegramNotifier:
                 name = self._exchange_ref.EXCHANGE_NAMES.get(eid, eid)
                 lines.append(f"  📡 {name}: {n} пар")
 
-        lines.append(f"\n⚙️ OI≥{config.OI_MCAP_RATIO}% | F≤{config.MAX_FUNDING_RATE}% | MCap≤${config.MAX_MARKET_CAP/1e6:.0f}M")
+        lines.append(f"\n⚙️ OI≥{config.OI_MCAP_RATIO}% | F≤{config.MAX_FUNDING_RATE}% | MCap≥${config.MIN_MARKET_CAP/1e6:.0f}M | Score≥{config.MIN_SIGNAL_SCORE}")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
