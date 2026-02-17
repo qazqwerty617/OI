@@ -167,11 +167,15 @@ class OIScannerBot:
                 all_signals.extend(r)
         all_signals.sort(key=lambda s: s.score, reverse=True)
 
+        # Только ТОП-2 лучших за цикл — не спамить пачками
+        top_signals = all_signals[:2]
+
         # Отправляем + трекинг
-        for signal in all_signals:
+        for signal in top_signals:
             await self.telegram.send_signal(signal)
             self.tracker.add_signal(signal)
             self._total_signals += 1
+            await asyncio.sleep(1)  # пауза между сообщениями
 
         # Обновляем текущие цены для всех отслеживаемых сигналов
         if all_prices:
