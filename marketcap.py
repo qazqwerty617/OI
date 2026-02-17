@@ -1,6 +1,6 @@
 """
 marketcap.py — Провайдер маркеткапов через CoinGecko
-Async, кэш, полная загрузка
+Retry с backoff, User-Agent, кэш
 """
 import asyncio
 import time
@@ -15,18 +15,16 @@ logger = logging.getLogger("oi_scanner")
 
 
 class MarketCapProvider:
-    """
-    Кэширующий провайдер маркеткапов через CoinGecko.
-    Загружает ВСЕ доступные монеты (до 2500).
-    """
-
     COINGECKO_BASE = "https://api.coingecko.com/api/v3"
     COINGECKO_PRO_BASE = "https://pro-api.coingecko.com/api/v3"
+
+    MAX_RETRIES = 3
+    RETRY_DELAY = 15  # секунд между retry при 429
 
     def __init__(self, api_key: str = "", cache_ttl: int = 300):
         self.api_key = api_key
         self.cache_ttl = cache_ttl
-        self._cache: Dict[str, float] = {}  # SYMBOL → mcap_usd
+        self._cache: Dict[str, float] = {}
         self._cache_time: float = 0
         self._lock = asyncio.Lock()
 
@@ -35,7 +33,10 @@ class MarketCapProvider:
         return self.COINGECKO_PRO_BASE if self.api_key else self.COINGECKO_BASE
 
     def _headers(self) -> Dict:
-        h = {"Accept": "application/json"}
+        h = {
+            "Accept": "application/json",
+            "User-Agent": "OI-Scanner-Bot/1.0",
+        }
         if self.api_key:
             h["x-cg-pro-api-key"] = self.api_key
         return h
@@ -45,7 +46,6 @@ class MarketCapProvider:
         return not self._cache or (time.time() - self._cache_time) >= self.cache_ttl
 
     async def refresh_cache(self):
-        """Загрузить маркеткапы всех монет"""
         async with self._lock:
             if not self.is_stale:
                 return
@@ -55,35 +55,32 @@ class MarketCapProvider:
             start = time.time()
 
             try:
+                timeout = aiohttp.ClientTimeout(total=60)
                 async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=timeout,
                     headers=self._headers(),
                 ) as session:
-                    for page in range(1, 11):  # До 2500 монет
-                        try:
-                            data = await self._fetch_page(session, page)
-                            if not data:
-                                break
-
-                            for coin in data:
-                                sym = coin.get("symbol", "").upper()
-                                mcap = coin.get("market_cap")
-                                if sym and mcap and mcap > 0:
-                                    existing = all_coins.get(sym, 0)
-                                    if mcap > existing:
-                                        all_coins[sym] = mcap
-
-                            if not self.api_key:
-                                await asyncio.sleep(1.5)
-                            else:
-                                await asyncio.sleep(0.3)
-
-                        except Exception as e:
-                            if "429" in str(e):
-                                logger.warning(f"⚠️  CoinGecko rate-limit на стр. {page}, стоп")
-                                break
-                            logger.warning(f"CoinGecko ошибка стр. {page}: {e}")
+                    for page in range(1, 11):
+                        data = await self._fetch_page_with_retry(session, page)
+                        if data is None:
                             break
+
+                        if not data:
+                            break
+
+                        for coin in data:
+                            sym = coin.get("symbol", "").upper()
+                            mcap = coin.get("market_cap")
+                            if sym and mcap and mcap > 0:
+                                existing = all_coins.get(sym, 0)
+                                if mcap > existing:
+                                    all_coins[sym] = mcap
+
+                        # Пауза между страницами
+                        if not self.api_key:
+                            await asyncio.sleep(2.0)
+                        else:
+                            await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"CoinGecko фатал: {e}")
@@ -93,7 +90,6 @@ class MarketCapProvider:
                 self._cache_time = time.time()
                 elapsed = time.time() - start
 
-                # Диагностика
                 min_cap = config.MIN_MARKET_CAP
                 max_cap = config.MAX_MARKET_CAP
                 eligible = sum(
@@ -107,7 +103,9 @@ class MarketCapProvider:
             else:
                 logger.warning("⚠️  Маркеткапы не загружены!")
 
-    async def _fetch_page(self, session: aiohttp.ClientSession, page: int) -> list:
+    async def _fetch_page_with_retry(self, session: aiohttp.ClientSession,
+                                      page: int) -> Optional[list]:
+        """Загрузить страницу с retry при 429"""
         url = f"{self._base_url}/coins/markets"
         params = {
             "vs_currency": "usd",
@@ -116,15 +114,48 @@ class MarketCapProvider:
             "page": str(page),
             "sparkline": "false",
         }
-        async with session.get(url, params=params) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 429:
+                        # Rate limit — ждём и пробуем снова
+                        wait = self.RETRY_DELAY * (attempt + 1)
+                        logger.warning(
+                            f"⚠️  CoinGecko 429 (стр. {page}), "
+                            f"retry {attempt + 1}/{self.MAX_RETRIES} через {wait}с..."
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+
+                    resp.raise_for_status()
+                    return await resp.json()
+
+            except aiohttp.ClientResponseError as e:
+                if e.status == 429:
+                    wait = self.RETRY_DELAY * (attempt + 1)
+                    logger.warning(
+                        f"⚠️  CoinGecko 429 (стр. {page}), "
+                        f"retry {attempt + 1}/{self.MAX_RETRIES} через {wait}с..."
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                logger.warning(f"CoinGecko HTTP {e.status} стр. {page}")
+                return None
+            except Exception as e:
+                logger.warning(f"CoinGecko ошибка стр. {page}: {e}")
+                if attempt < self.MAX_RETRIES - 1:
+                    await asyncio.sleep(5)
+                    continue
+                return None
+
+        logger.warning(f"⚠️  CoinGecko стр. {page}: все retry исчерпаны")
+        return None
 
     def get_market_cap(self, symbol: str) -> Optional[float]:
         return self._cache.get(symbol.upper())
 
     def get_eligible_symbols(self) -> Set[str]:
-        """Символы которые проходят фильтр по MCap"""
         min_cap = config.MIN_MARKET_CAP
         max_cap = config.MAX_MARKET_CAP
         result = set()
