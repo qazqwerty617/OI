@@ -107,9 +107,11 @@ class StrategyScanner:
             return None
 
         # ──── Funding ────
-        if funding_rate > config.MAX_FUNDING_RATE:
-            self._diag["funding_high"] += 1
-            return None
+        if funding_rate is not None:
+            if funding_rate > config.MAX_FUNDING_RATE:
+                self._diag["funding_high"] += 1
+                return None
+        # funding_rate=None → пропускаем фильтр, но скор будет ниже
 
         # ──── Spread ────
         price_spread = None
@@ -163,17 +165,20 @@ class StrategyScanner:
         factor_scores["oi"] = round(oi_score, 1)
 
         # 2. Funding (0-25)
-        abs_fund = abs(funding_rate)
-        if abs_fund >= 0.5:
-            fund_score = 25.0
-        elif abs_fund >= 0.1:
-            fund_score = 22.0 + (abs_fund - 0.1) / 0.4 * 3.0
-        elif abs_fund >= 0.05:
-            fund_score = 18.0 + (abs_fund - 0.05) / 0.05 * 4.0
-        elif abs_fund >= 0.01:
-            fund_score = 10.0 + (abs_fund - 0.01) / 0.04 * 8.0
+        if funding_rate is not None:
+            abs_fund = abs(funding_rate)
+            if abs_fund >= 0.5:
+                fund_score = 25.0
+            elif abs_fund >= 0.1:
+                fund_score = 22.0 + (abs_fund - 0.1) / 0.4 * 3.0
+            elif abs_fund >= 0.05:
+                fund_score = 18.0 + (abs_fund - 0.05) / 0.05 * 4.0
+            elif abs_fund >= 0.01:
+                fund_score = 10.0 + (abs_fund - 0.01) / 0.04 * 8.0
+            else:
+                fund_score = abs_fund / 0.01 * 10.0
         else:
-            fund_score = abs_fund / 0.01 * 10.0
+            fund_score = 5.0  # Нет данных — низкий скор
         factor_scores["funding"] = round(min(25.0, fund_score), 1)
 
         # 3. Spread (0-25)
