@@ -1,9 +1,9 @@
 """
 OI Scanner Bot — Таблетка от бедности 💊
-Параллельное сканирование с мини-дашбордом
+Параллельное сканирование + мини-дашборд с TP/SL
 
 Запуск: python main.py
-Дашборд: http://your-server:8080
+Дашборд: http://your-server:PORT
 """
 import asyncio
 import logging
@@ -47,11 +47,12 @@ class OIScannerBot:
             chat_id=config.TELEGRAM_CHAT_ID,
             topic_id=config.TELEGRAM_TOPIC_ID,
         )
-        self.tracker = SignalTracker(max_signals=10)
+        self.tracker = SignalTracker()
         self.dashboard = Dashboard(self.tracker, port=config.DASHBOARD_PORT)
         self._running = False
         self._cycle = 0
         self._total_signals = 0
+        self._price_cache: dict = {}
 
     async def start(self):
         logger.info("═" * 52)
@@ -99,8 +100,15 @@ class OIScannerBot:
         logger.info("")
         logger.info("🔍 Начинаю сканирование...\n")
 
-        # 6. Main loop
+        # 6. Запуск: scan loop + price update loop
         self._running = True
+        await asyncio.gather(
+            self._scan_loop(),
+            self._price_update_loop(),
+        )
+
+    async def _scan_loop(self):
+        """Основной цикл сканирования"""
         while self._running:
             try:
                 await self._scan_cycle()
@@ -113,6 +121,82 @@ class OIScannerBot:
                 if not self._running:
                     break
                 await asyncio.sleep(1)
+
+    async def _price_update_loop(self):
+        """Быстрое обновление цен для трекера (каждые 10с)"""
+        while self._running:
+            await asyncio.sleep(10)
+            try:
+                tracked = self.tracker.get_symbols_to_track()
+                if not tracked:
+                    continue
+
+                # Берём цены с первой доступной биржи (binance если есть)
+                for eid in self.exchange_mgr.get_connected_exchanges():
+                    exchange = self.exchange_mgr.exchanges.get(eid)
+                    if not exchange:
+                        continue
+                    try:
+                        raw = await exchange.fetch_tickers()
+                        prices = {}
+                        for sym, t in raw.items():
+                            last = t.get("last")
+                            if last:
+                                try:
+                                    v = float(last)
+                                    if v > 0:
+                                        prices[sym] = v
+                                        # Также по base
+                                        if "/" in sym:
+                                            base = sym.split("/")[0]
+                                            prices[base] = v
+                                except (ValueError, TypeError):
+                                    pass
+                        if prices:
+                            self._price_cache.update(prices)
+                        break  # одной биржи достаточно
+                    except Exception:
+                        continue
+
+                if self._price_cache:
+                    closed = self.tracker.update_prices(self._price_cache)
+                    # Отправляем уведомления о закрытых сделках в Telegram
+                    for c in closed:
+                        await self._send_close_notification(c)
+
+            except Exception as e:
+                logger.debug(f"Price update err: {e}")
+
+    async def _send_close_notification(self, closed):
+        """Уведомление о закрытии сделки"""
+        if closed.result == "WIN":
+            emoji = "🟢✅"
+            text = (
+                f"{emoji} *ДЕМО ЛОНГ ЗАКРЫТ — WIN*\n\n"
+                f"*{closed.base}* — {closed.exchange_name}\n"
+                f"Вход: ${closed.entry_price:.6g}\n"
+                f"Закрытие: ${closed.close_price:.6g}\n"
+                f"P&L: *+{closed.pnl_pct:.2f}%* ✅\n"
+                f"Время: {closed.hold_time_min:.0f} мин\n"
+                f"Score: {closed.score}"
+            )
+        else:
+            emoji = "🔴❌"
+            text = (
+                f"{emoji} *ДЕМО ЛОНГ ЗАКРЫТ — LOSS*\n\n"
+                f"*{closed.base}* — {closed.exchange_name}\n"
+                f"Вход: ${closed.entry_price:.6g}\n"
+                f"Закрытие: ${closed.close_price:.6g}\n"
+                f"P&L: *{closed.pnl_pct:.2f}%* ❌\n"
+                f"Время: {closed.hold_time_min:.0f} мин\n"
+                f"Score: {closed.score}"
+            )
+
+        # Добавляем текущий winrate
+        sm = self.tracker.get_summary()
+        text += f"\n\n📊 Winrate: {sm['winrate']}% ({sm['wins']}W/{sm['losses']}L)"
+
+        await self.telegram._send_with_retry(text)
 
     async def _scan_cycle(self):
         self._cycle += 1
@@ -130,11 +214,7 @@ class OIScannerBot:
             return
 
         self.scanner.reset_diagnostics()
-
         exchanges = self.exchange_mgr.get_connected_exchanges()
-
-        # Собираем ВСЕ текущие цены в единый словарь для трекера
-        all_prices = {}
 
         async def scan_one(eid: str):
             try:
@@ -146,8 +226,8 @@ class OIScannerBot:
                 for sym, d in all_data.items():
                     price = d.get("futures_price")
                     if price and price > 0:
-                        all_prices[sym] = price
-                        all_prices[d["base"]] = price
+                        self._price_cache[sym] = price
+                        self._price_cache[d["base"]] = price
 
                 mcap_lookup = dict(self.mcap_provider._cache)
                 return self.scanner.evaluate_batch(all_data, mcap_lookup)
@@ -167,7 +247,7 @@ class OIScannerBot:
                 all_signals.extend(r)
         all_signals.sort(key=lambda s: s.score, reverse=True)
 
-        # Только ТОП-2 лучших за цикл — не спамить пачками
+        # ТОП-2 лучших за цикл
         top_signals = all_signals[:2]
 
         # Отправляем + трекинг
@@ -175,34 +255,34 @@ class OIScannerBot:
             await self.telegram.send_signal(signal)
             self.tracker.add_signal(signal)
             self._total_signals += 1
-            await asyncio.sleep(1)  # пауза между сообщениями
+            await asyncio.sleep(1)
 
-        # Обновляем текущие цены для всех отслеживаемых сигналов
-        if all_prices:
-            self.tracker.update_prices(all_prices)
+        # Обновляем цены трекера
+        if self._price_cache:
+            closed = self.tracker.update_prices(self._price_cache)
+            for c in closed:
+                await self._send_close_notification(c)
 
         # Cleanup
         if self._cycle % 10 == 0:
             self.scanner.cleanup_cooldowns()
 
         elapsed = time.time() - t0
-
         diag = self.scanner.get_diagnostics()
         logger.info(f"   📋 Фильтры: {diag}")
 
-        # P&L сводка трекера
-        summary = self.tracker.get_summary()
-        if summary["active_count"] > 0:
+        # Dashboard summary
+        sm = self.tracker.get_summary()
+        if sm["active_count"] > 0:
             logger.info(
-                f"   📊 Дашборд: {summary['active_count']} актив | "
-                f"Avg: {summary['avg_pnl']:+.3f}% | "
-                f"Best: {summary['best_pnl']:+.3f}% | "
-                f"Win: {summary['profitable']} Loss: {summary['losing']}"
+                f"   📊 Трекер: {sm['active_count']} актив | "
+                f"Avg: {sm['avg_pnl']:+.2f}% | "
+                f"WR: {sm['winrate']}% ({sm['wins']}W/{sm['losses']}L)"
             )
 
         logger.info(
             f"   ✅ Цикл #{self._cycle} за {elapsed:.1f}с | "
-            f"Сигналов: {len(all_signals)} (всего: {self._total_signals})"
+            f"Сигналов: {len(top_signals)} (всего: {self._total_signals})"
         )
 
     async def stop(self):
