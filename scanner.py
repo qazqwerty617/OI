@@ -99,6 +99,92 @@ class Signal:
             return f"{self.price_growth_pct:+.1f}%"
         return "N/A"
 
+    def get_targets(self) -> Dict[str, Dict[str, float]]:
+        """
+        Умное вычисление целевых цен на основе:
+        - OI рост (больше рост → сильнее сквиз)
+        - Funding (более отрицательный → больше шортов к ликвидации)
+        - MCap (меньше → волатильнее, больше потенциал)
+        - Volume/MCap (выше → активнее торгуется, резче движения)
+
+        Возвращает 3 таргета: conservative, moderate, aggressive
+        """
+        base_pct = 3.0  # Базовый ожидаемый рост %
+
+        # 1. OI Growth бонус: чем быстрее растёт OI, тем сильнее сквиз
+        if self.oi_growth_pct and self.oi_growth_pct > 0:
+            if self.oi_growth_pct >= 80:
+                base_pct += 12.0
+            elif self.oi_growth_pct >= 50:
+                base_pct += 8.0
+            elif self.oi_growth_pct >= 30:
+                base_pct += 5.0
+            else:
+                base_pct += 2.0
+
+        # 2. Funding бонус: сильно отрицательный = много шортов
+        if self.funding_rate is not None:
+            if self.funding_rate <= -0.5:
+                base_pct += 10.0  # Экстримальный шорт-сквиз
+            elif self.funding_rate <= -0.2:
+                base_pct += 7.0
+            elif self.funding_rate <= -0.1:
+                base_pct += 5.0
+            elif self.funding_rate <= -0.05:
+                base_pct += 3.0
+            elif self.funding_rate <= -0.01:
+                base_pct += 1.5
+
+        # 3. MCap множитель: лоукапы движутся сильнее
+        if self.mcap <= 10e6:
+            base_pct *= 2.0   # <$10M — может x2 от базы
+        elif self.mcap <= 30e6:
+            base_pct *= 1.6
+        elif self.mcap <= 100e6:
+            base_pct *= 1.3
+        elif self.mcap <= 300e6:
+            base_pct *= 1.1
+        # >$300M — без множителя
+
+        # 4. Volume/MCap волатильность
+        if self.mcap > 0:
+            vol_ratio = self.volume_24h / self.mcap
+            if vol_ratio >= 1.0:  # 100%+ оборот
+                base_pct *= 1.5
+            elif vol_ratio >= 0.5:
+                base_pct *= 1.3
+            elif vol_ratio >= 0.2:
+                base_pct *= 1.1
+
+        # 5. Rocket score бонус
+        if self.rocket_score >= 80:
+            base_pct *= 1.3
+        elif self.rocket_score >= 60:
+            base_pct *= 1.15
+
+        # Ограничиваем разумными пределами
+        base_pct = min(base_pct, 60.0)  # Макс 60%
+
+        price = self.futures_price
+        conservative = base_pct * 0.4
+        moderate = base_pct * 0.7
+        aggressive = base_pct
+
+        return {
+            "conservative": {
+                "pct": round(conservative, 1),
+                "price": round(price * (1 + conservative / 100), 6),
+            },
+            "moderate": {
+                "pct": round(moderate, 1),
+                "price": round(price * (1 + moderate / 100), 6),
+            },
+            "aggressive": {
+                "pct": round(aggressive, 1),
+                "price": round(price * (1 + aggressive / 100), 6),
+            },
+        }
+
 
 class StrategyScanner:
     """Сканер с топ-фильтрами и диагностикой"""
@@ -150,25 +236,26 @@ class StrategyScanner:
         # ═══════════════ ФИЛЬТРЫ (жёсткие) ═══════════════
 
         # 1. MCap
-        if mcap is None or mcap <= 0:
+        if (mcap is None or mcap <= 0) and config.MIN_MARKET_CAP > 0:
             self._diag["no_mcap"] += 1
             return None
 
-        if mcap < config.MIN_MARKET_CAP:
-            self._diag["mcap_low"] += 1
-            return None
+        if mcap and mcap > 0:
+            if mcap < config.MIN_MARKET_CAP:
+                self._diag["mcap_low"] += 1
+                return None
 
-        if config.MAX_MARKET_CAP > 0 and mcap > config.MAX_MARKET_CAP:
-            self._diag["mcap_high"] += 1
-            return None
+            if config.MAX_MARKET_CAP > 0 and mcap > config.MAX_MARKET_CAP:
+                self._diag["mcap_high"] += 1
+                return None
 
         # 2. OI/MCap ratio
-        oi_mcap_ratio = (oi_usd / mcap) * 100
-        if oi_mcap_ratio < config.OI_MCAP_RATIO:
+        oi_mcap_ratio = (oi_usd / mcap * 100) if (mcap and mcap > 0) else 0
+        if config.OI_MCAP_RATIO > 0 and oi_mcap_ratio < config.OI_MCAP_RATIO:
             self._diag["oi_ratio_low"] += 1
             return None
 
-        # 3. OI в долларах (минимум $500K)
+        # 3. OI в долларах (минимум $1M)
         if oi_usd < config.MIN_OI_USD:
             self._diag["oi_usd_low"] += 1
             return None
@@ -195,8 +282,8 @@ class StrategyScanner:
             return None
 
         # 7. 🌋 Волатильность (Volume/MCap) — только активные монеты
-        vol_mcap_ratio = (volume_24h / mcap) * 100
-        if vol_mcap_ratio < config.MIN_VOL_MCAP_RATIO:
+        vol_mcap_ratio = (volume_24h / mcap * 100) if (mcap and mcap > 0) else 0
+        if config.MIN_VOL_MCAP_RATIO > 0 and vol_mcap_ratio < config.MIN_VOL_MCAP_RATIO:
             self._diag["vol_ratio_low"] += 1
             return None
 
@@ -335,15 +422,26 @@ class StrategyScanner:
 
         # ──── 4. MCap (0-25) ────
         # Меньше = лучше: $2M → 25, $10M → 20, $50M → 15, $500M → 7
-        if mcap <= config.MIN_MARKET_CAP:
-            mcap_score = 25.0
-        elif mcap >= 1e9:
-            mcap_score = 2.0
+        if mcap is None or mcap <= 0:
+            mcap_score = 15.0  # Средний скор если капа неизвестна
+        elif config.MIN_MARKET_CAP > 0:
+            if mcap <= config.MIN_MARKET_CAP:
+                mcap_score = 25.0
+            elif mcap >= 1e9:
+                mcap_score = 2.0
+            else:
+                mcap_score = max(0.0, 25.0 - 4.5 * math.log10(mcap / config.MIN_MARKET_CAP))
         else:
-            mcap_score = max(0.0, 25.0 - 4.5 * math.log10(mcap / config.MIN_MARKET_CAP))
+            # Капа есть, но фильтр отключен — даем скор за сам факт наличия данных
+            if mcap >= 1e9:
+                mcap_score = 5.0
+            elif mcap >= 100e6:
+                mcap_score = 15.0
+            else:
+                mcap_score = 20.0
 
         # Бонус за volume/mcap (высокий оборот = интерес к монете)
-        if mcap > 0 and volume_24h > 0:
+        if mcap and mcap > 0 and volume_24h > 0:
             vol_mcap = volume_24h / mcap
             if vol_mcap >= 0.5:  # 50%+ от капы = отлично
                 mcap_score = min(25.0, mcap_score + 3.0)

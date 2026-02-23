@@ -171,9 +171,24 @@ class TelegramNotifier:
         if signal.price_growth_pct is not None:
             lines.append(f"💹 Цена за 10мин: *{signal.price_growth_str}*")
 
+        # 🎯 Целевые цены
+        targets = signal.get_targets()
+        t_con = targets["conservative"]
+        t_mod = targets["moderate"]
+        t_agg = targets["aggressive"]
+
+        # Формат цены
+        def fmt_price(p):
+            return f"${p:,.4f}" if p >= 1 else f"${p:.6g}"
+
         lines.extend([
             "",
-            f"💰 Цена: {price_str}",
+            f"💰 Цена входа: {price_str}",
+            "",
+            "🎯 *Целевые цены:*",
+            f"🟢 Осторожный: {fmt_price(t_con['price'])} (+{t_con['pct']}%)",
+            f"🟡 Умеренный: {fmt_price(t_mod['price'])} (+{t_mod['pct']}%)",
+            f"🔴 Агрессивный: {fmt_price(t_agg['price'])} (+{t_agg['pct']}%)",
             "",
             "```",
             factor_bars.rstrip(),

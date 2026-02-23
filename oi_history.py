@@ -44,7 +44,7 @@ class OIHistory:
                 self.record(symbol, oi, price, volume)
 
     def _get_oldest_in_window(self, symbol: str, window_sec: int):
-        """Найти самый старый снэпшот в пределах окна с минимум 3 мин истории"""
+        """Найти самый старый снэпшот в пределах окна. Минимум 80% от окна должно быть в истории."""
         snapshots = self._data.get(symbol)
         if not snapshots or len(snapshots) < 2:
             return None, None
@@ -63,24 +63,41 @@ class OIHistory:
         if oldest is None:
             return None, None
 
-        # Минимум 3 минуты истории
-        age = now - oldest[0]
-        if age < 180:
+        # Требуем хотя бы 80% от window_sec истории, чтобы расчет был точным
+        # Для 10 мин окна (600с) это 480с (8 минут)
+        min_history = window_sec * 0.8
+        history_age = now - oldest[0]
+        if history_age < min_history:
             return None, None
 
         return oldest, current
 
     def get_growth_pct(self, symbol: str, window_sec: int = 600) -> Optional[float]:
-        """% роста OI за window_sec секунд"""
+        """
+        % роста OI, скорректированный на изменение цены (рост кол-ва контрактов).
+        Это исключает ложное завышение % при пампе цены.
+        """
         oldest, current = self._get_oldest_in_window(symbol, window_sec)
         if oldest is None or current is None:
             return None
 
+        # snap: (ts, oi_usd, price, volume)
         old_oi = oldest[1]
-        if old_oi <= 0:
+        old_price = oldest[2]
+        curr_oi = current[1]
+        curr_price = current[2]
+
+        if old_oi <= 0 or old_price <= 0 or curr_price <= 0:
             return None
 
-        return ((current[1] - old_oi) / old_oi) * 100
+        # Считаем рост "количества контрактов" = (OI_usd / Price)
+        old_contracts = old_oi / old_price
+        curr_contracts = curr_oi / curr_price
+
+        if old_contracts <= 0:
+            return None
+
+        return ((curr_contracts - old_contracts) / old_contracts) * 100
 
     def get_price_growth_pct(self, symbol: str, window_sec: int = 600) -> Optional[float]:
         """% роста ЦЕНЫ за window_sec секунд"""

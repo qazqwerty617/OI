@@ -112,6 +112,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     margin-top: 16px; padding-top: 12px; border-top: 1px solid #111;
   }
 
+  .btn-reset {
+    background: #3a1b1b; color: #ff5252; border: 1px solid #5a1b1b;
+    padding: 6px 12px; border-radius: 4px; font-family: inherit;
+    font-size: 0.7em; cursor: pointer; margin-top: 12px;
+    text-transform: uppercase; transition: background 0.2s;
+  }
+  .btn-reset:hover { background: #5a1b1b; }
+
   @media (max-width: 600px) {
     body { padding: 8px; }
     .card .value { font-size: 1em; }
@@ -125,6 +133,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <div class="header">
   <h1>💊 OI Scanner Dashboard</h1>
   <div class="subtitle"><span class="pulse"></span>Live Demo Trading • TP: +10% / SL: -10%</div>
+  <button class="btn-reset" onclick="confirmReset()">Очистить дашборд</button>
 </div>
 
 <div class="summary" id="summary">
@@ -140,8 +149,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <div class="tbl-wrap">
 <table>
   <thead><tr>
-    <th>#</th><th>Монета</th><th>Биржа</th><th>Вход</th><th>Текущая</th>
-    <th>P&L</th><th>Прогресс</th><th>Score</th><th>Время</th>
+    <th>#</th><th>Монета</th><th>Биржа</th><th>P&L (Total)</th><th>Остаток</th><th>Таргеты (1/2/3)</th>
+    <th>Вход</th><th>Текущая</th><th>Stop Loss</th><th>Время</th>
   </tr></thead>
   <tbody id="active-body">
     <tr><td colspan="9" class="no-data">Ожидание сигналов...</td></tr>
@@ -195,21 +204,26 @@ async function fetchData() {
     // Active
     const ab = document.getElementById('active-body');
     if (!d.active || !d.active.length) {
-      ab.innerHTML = '<tr><td colspan="9" class="no-data">Ожидание сигналов...</td></tr>';
+      ab.innerHTML = '<tr><td colspan="10" class="no-data">Ожидание сигналов...</td></tr>';
     } else {
-      ab.innerHTML = d.active.map(s =>
-        `<tr>
+      ab.innerHTML = d.active.map(s => {
+        const t1 = s.stage >= 1 ? '✅' : '⚪';
+        const t2 = s.stage >= 2 ? '✅' : '⚪';
+        const t3 = '⚪'; // TP3 closes the trade
+        
+        return `<tr>
           <td>${s.id}</td>
           <td><span class="coin">${s.base}</span></td>
           <td><span class="exch">${s.exchange_name}</span></td>
+          <td class="pnl ${PC(s.pnl_pct)}">${FPNL(s.pnl_pct)} <small style="color:#555">R:${FPNL(s.realized_pnl)}/U:${FPNL(s.unrealized_pnl)}</small></td>
+          <td>${Math.round(s.pos_size * 100)}%</td>
+          <td>${t1}${t2}${t3}</td>
           <td>${FP(s.entry_price)}</td>
           <td>${FP(s.current_price)}</td>
-          <td class="pnl ${PC(s.pnl_pct)}">${FPNL(s.pnl_pct)}</td>
-          <td>${pnlBar(s.pnl_pct)}</td>
-          <td><span class="badge ${SC(s.score)}">${s.score}</span></td>
+          <td style="color:#ff5252">${FP(s.sl_price)}</td>
           <td class="time">${FT(s.hold_time_min)}</td>
-        </tr>`
-      ).join('');
+        </tr>`;
+      }).join('');
     }
 
     // History
@@ -234,6 +248,18 @@ async function fetchData() {
   } catch(e) { console.error(e); }
 }
 
+async function confirmReset() {
+  if (confirm("⚠️ Вы уверены, что хотите полностью очистить историю и активные сделки?")) {
+    try {
+      const r = await fetch('/api/reset', { method: 'POST' });
+      if (r.ok) {
+        alert("✅ Дашборд очищен.");
+        fetchData();
+      }
+    } catch(e) { console.error(e); }
+  }
+}
+
 fetchData();
 setInterval(fetchData, 3000);
 </script>
@@ -250,6 +276,7 @@ class Dashboard:
         self._runner = None
         self.app.router.add_get("/", self._page)
         self.app.router.add_get("/api/signals", self._api)
+        self.app.router.add_post("/api/reset", self._reset)
 
     async def start(self):
         self._runner = web.AppRunner(self.app)
@@ -271,3 +298,7 @@ class Dashboard:
             "history": self.tracker.get_history(),
             "summary": self.tracker.get_summary(),
         })
+
+    async def _reset(self, req):
+        self.tracker.clear_all()
+        return web.json_response({"status": "ok"})

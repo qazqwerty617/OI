@@ -21,8 +21,8 @@ TELEGRAM_TOPIC_ID = int(os.getenv("TELEGRAM_TOPIC_ID", "0"))
 # ═══════════════════════════════════════════
 
 # --- OI (Open Interest) ---
-# OI / MCap >= 15% → реальный перегрев
-OI_MCAP_RATIO = float(os.getenv("OI_MCAP_RATIO", "15.0"))
+# Фильтр OI/MCap отключен (0.0)
+OI_MCAP_RATIO = float(os.getenv("OI_MCAP_RATIO", "0.0"))
 
 # Минимальный OI в долларах → только крупные монеты
 MIN_OI_USD = float(os.getenv("MIN_OI_USD", "1000000"))
@@ -48,15 +48,13 @@ MAX_PRICE_SPREAD = float(os.getenv("MAX_PRICE_SPREAD", "2.0"))
 BACKWARDATION_BONUS = float(os.getenv("BACKWARDATION_BONUS", "1.5"))
 
 # --- Market Cap ---
-# MCap >= $5M → только серьёзные проекты
-MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "5000000"))
-
-# MCap верхний лимит → лоукапы/мидкапы рокетят сильнее
-MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "500000000"))  # $500M
+# Фильтр капы отключен (0 = не проверять)
+MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "0"))
+MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "0"))
 
 # --- Волатильность ---
-# Volume/MCap >= 10% → только активные/волатильные монеты
-MIN_VOL_MCAP_RATIO = float(os.getenv("MIN_VOL_MCAP_RATIO", "10.0"))  # %
+# Фильтр волатильности по капе отключен (0.0)
+MIN_VOL_MCAP_RATIO = float(os.getenv("MIN_VOL_MCAP_RATIO", "0.0"))
 
 # --- 24h Volume ---
 # Объём торгов >= $500K → реальная ликвидность
