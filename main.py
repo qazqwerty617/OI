@@ -94,9 +94,9 @@ class OIScannerBot:
         cap_str = f"${config.MIN_MARKET_CAP/1e6:.0f}M+"
         if config.MAX_MARKET_CAP > 0:
             cap_str += f" (макс ${config.MAX_MARKET_CAP/1e6:.0f}M)"
-        logger.info(f"⚙️  OI/MCap ≥ {config.OI_MCAP_RATIO}% | OI ≥ ${config.MIN_OI_USD/1e3:.0f}K | Funding ≤ {config.MAX_FUNDING_RATE}%")
-        logger.info(f"⚙️  Спред ≤ ±{config.MAX_PRICE_SPREAD}% | MCap: {cap_str} | Vol ≥ ${config.MIN_VOLUME_24H/1e3:.0f}K")
-        logger.info(f"⚙️  Score ≥ {config.MIN_SIGNAL_SCORE} | Интервал: {config.SCAN_INTERVAL}с")
+        logger.info(f"⚙️  OI/MCap ≥ {config.OI_MCAP_RATIO}% | OI ≥ ${config.MIN_OI_USD/1e3:.0f}K | OIРост ≥ {config.MIN_OI_GROWTH_PCT}% за {config.OI_GROWTH_WINDOW//60}мин")
+        logger.info(f"⚙️  Funding ≤ {config.MAX_FUNDING_RATE}% | Спред ≤ ±{config.MAX_PRICE_SPREAD}% | MCap: {cap_str}")
+        logger.info(f"⚙️  Vol ≥ ${config.MIN_VOLUME_24H/1e3:.0f}K | Score ≥ {config.MIN_SIGNAL_SCORE} | MaxPump ≤ {config.MAX_PRICE_PUMP_PCT}% | CD: {config.SIGNAL_COOLDOWN//60}мин")
         logger.info("")
         logger.info("🔍 Начинаю сканирование...\n")
 
@@ -247,8 +247,8 @@ class OIScannerBot:
                 all_signals.extend(r)
         all_signals.sort(key=lambda s: s.score, reverse=True)
 
-        # ТОП-2 лучших за цикл
-        top_signals = all_signals[:2]
+        # ТОП-1 лучший за цикл
+        top_signals = all_signals[:1]
 
         # Отправляем + трекинг
         for signal in top_signals:
@@ -266,6 +266,7 @@ class OIScannerBot:
         # Cleanup
         if self._cycle % 10 == 0:
             self.scanner.cleanup_cooldowns()
+            self.scanner.oi_history.cleanup()
 
         elapsed = time.time() - t0
         diag = self.scanner.get_diagnostics()

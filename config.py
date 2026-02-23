@@ -27,6 +27,15 @@ OI_MCAP_RATIO = float(os.getenv("OI_MCAP_RATIO", "12.0"))
 # Минимальный OI в долларах → отсекает пыль
 MIN_OI_USD = float(os.getenv("MIN_OI_USD", "500000"))
 
+# --- OI Динамика (перегрев) ---
+# OI должен вырасти на ≥15% за 10 минут → реальный разгон
+MIN_OI_GROWTH_PCT = float(os.getenv("MIN_OI_GROWTH_PCT", "15.0"))
+OI_GROWTH_WINDOW = int(os.getenv("OI_GROWTH_WINDOW", "600"))  # 10 мин
+
+# --- Проверка «не опоздали» ---
+# Если цена уже выросла на ≥5% за 10 мин → поздно входить
+MAX_PRICE_PUMP_PCT = float(os.getenv("MAX_PRICE_PUMP_PCT", "5.0"))
+
 # --- Funding Rate ---
 # Funding <= -0.01% → шорты реально платят
 MAX_FUNDING_RATE = float(os.getenv("MAX_FUNDING_RATE", "-0.01"))
@@ -51,7 +60,7 @@ MIN_VOLUME_24H = float(os.getenv("MIN_VOLUME_24H", "100000"))
 
 # --- Score ---
 # Минимальный score для отправки сигнала (0-100)
-MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "50"))
+MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "60"))
 
 # ═══════════════════════════════════════════
 # Биржи
@@ -72,7 +81,7 @@ EXCHANGES = [
 # ═══════════════════════════════════════════
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "30"))
 MCAP_CACHE_TTL = int(os.getenv("MCAP_CACHE_TTL", "300"))
-SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1200"))
+SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1800"))  # 30 мин
 
 # CoinGecko
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")

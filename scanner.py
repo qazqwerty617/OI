@@ -2,14 +2,16 @@
 scanner.py — Ядро стратегии «Таблетка от бедности»
 
 ТОП фильтры:
-  1. OI/MCap ≥ 12% — реальный перегрев
-  2. OI ≥ $500K — объём значимый
-  3. Funding ≤ -0.01% — шорты платят
-  4. Спред ≤ ±2% — справедливая цена
-  5. Бэквордация → бонус ×1.5
-  6. MCap ≥ $2M — не скам
-  7. Volume ≥ $100K — ликвидность
-  8. Score ≥ 50 — только сильные сигналы
+  1. OI/MCap >= 12% — реальный перегрев
+  2. OI >= $500K — объём значимый
+  3. OI РОСТ >= 15% за 10мин — динамический перегрев
+  4. Цена НЕ выросла на 5%+ — не опоздали
+  5. Funding <= -0.01% — шорты платят
+  6. Спред <= +/-2% — справедливая цена
+  7. Бэквордация -> бонус x1.5
+  8. MCap >= $2M — не скам
+  9. Volume >= $100K — ликвидность
+  10. Score >= 60 — только сильные сигналы
 
 Непрерывный скоринг: логарифмический + линейный, 0-100 баллов.
 """
@@ -20,6 +22,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 import config
+from oi_history import OIHistory
 
 logger = logging.getLogger("oi_scanner")
 
@@ -39,6 +42,8 @@ class Signal:
     funding_rate: Optional[float]
     price_spread: Optional[float]
     volume_24h: float
+    oi_growth_pct: Optional[float]
+    price_growth_pct: Optional[float]
     score: int
     factor_scores: Dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
@@ -81,13 +86,26 @@ class Signal:
             return f"${self.oi_usd / 1e6:.1f}M"
         return f"${self.oi_usd / 1e3:.0f}K"
 
+    @property
+    def oi_growth_str(self) -> str:
+        if self.oi_growth_pct is not None:
+            return f"+{self.oi_growth_pct:.1f}%"
+        return "N/A"
+
+    @property
+    def price_growth_str(self) -> str:
+        if self.price_growth_pct is not None:
+            return f"{self.price_growth_pct:+.1f}%"
+        return "N/A"
+
 
 class StrategyScanner:
     """Сканер с топ-фильтрами и диагностикой"""
 
     FILTER_NAMES = [
         "no_mcap", "mcap_low", "mcap_high",
-        "oi_ratio_low", "oi_usd_low", "volume_low",
+        "oi_ratio_low", "oi_usd_low", "oi_growth_low", "oi_no_data",
+        "price_pumped", "volume_low",
         "funding_high", "spread_high",
         "score_low", "cooldown", "passed"
     ]
@@ -98,6 +116,7 @@ class StrategyScanner:
         self.coins_scanned = 0
         self.coins_passed_filter = 0
         self._diag = {k: 0 for k in self.FILTER_NAMES}
+        self.oi_history = OIHistory()
 
     def evaluate_batch(self, all_data: Dict[str, Dict],
                        mcap_lookup: Dict[str, float]) -> List[Signal]:
@@ -117,11 +136,15 @@ class StrategyScanner:
         self.coins_scanned += 1
 
         base = d["base"]
+        symbol = d["symbol"]
         oi_usd = d["oi_usd"]
         funding_rate = d.get("funding_rate")  # может быть None
         futures_price = d["futures_price"]
         spot_price = d.get("spot_price")
         volume_24h = d.get("volume_24h", 0) or 0
+
+        # Записываем OI и цену в историю (каждый цикл!)
+        self.oi_history.record(symbol, oi_usd, futures_price)
 
         # ═══════════════ ФИЛЬТРЫ (жёсткие) ═══════════════
 
@@ -149,18 +172,34 @@ class StrategyScanner:
             self._diag["oi_usd_low"] += 1
             return None
 
-        # 4. 24h Volume
+        # 4. 🔥 OI РОСТ — динамический перегрев
+        oi_growth = self.oi_history.get_growth_pct(symbol, config.OI_GROWTH_WINDOW)
+        if oi_growth is None:
+            # Нет достаточной истории — ждём накопления данных
+            self._diag["oi_no_data"] += 1
+            return None
+        if oi_growth < config.MIN_OI_GROWTH_PCT:
+            self._diag["oi_growth_low"] += 1
+            return None
+
+        # 5. 🚫 Проверка «не опоздали» — цена уже выросла?
+        price_growth = self.oi_history.get_price_growth_pct(symbol, config.OI_GROWTH_WINDOW)
+        if price_growth is not None and price_growth > config.MAX_PRICE_PUMP_PCT:
+            self._diag["price_pumped"] += 1
+            return None
+
+        # 6. 24h Volume
         if volume_24h < config.MIN_VOLUME_24H:
             self._diag["volume_low"] += 1
             return None
 
-        # 5. Funding rate (опциональный, но если есть — фильтруем)
+        # 7. Funding rate (опциональный, но если есть — фильтруем)
         if funding_rate is not None:
             if funding_rate > config.MAX_FUNDING_RATE:
                 self._diag["funding_high"] += 1
                 return None
 
-        # 6. Spread
+        # 8. Spread
         price_spread = None
         if spot_price and spot_price > 0:
             price_spread = ((futures_price - spot_price) / spot_price) * 100
@@ -170,15 +209,16 @@ class StrategyScanner:
 
         # ═══════════════ СКОРИНГ ═══════════════
         score, factor_scores = self._calculate_score(
-            oi_mcap_ratio, funding_rate, price_spread, mcap, volume_24h, oi_usd
+            oi_mcap_ratio, funding_rate, price_spread, mcap, volume_24h, oi_usd,
+            oi_growth
         )
 
-        # 7. Score порог
+        # 9. Score порог
         if score < config.MIN_SIGNAL_SCORE:
             self._diag["score_low"] += 1
             return None
 
-        # 8. Cooldown
+        # 10. Cooldown
         cooldown_key = f"{base}_{d['exchange']}"
         now = time.time()
         if (now - self._cooldowns.get(cooldown_key, 0)) < config.SIGNAL_COOLDOWN:
@@ -204,31 +244,42 @@ class StrategyScanner:
             funding_rate=funding_rate,
             price_spread=price_spread,
             volume_24h=volume_24h,
+            oi_growth_pct=oi_growth,
+            price_growth_pct=price_growth,
             score=score,
             factor_scores=factor_scores,
         )
 
     def _calculate_score(self, oi_mcap_ratio: float, funding_rate: Optional[float],
                          price_spread: Optional[float], mcap: float,
-                         volume_24h: float, oi_usd: float) -> tuple:
+                         volume_24h: float, oi_usd: float,
+                         oi_growth: float = 0.0) -> tuple:
         """
         Непрерывный скоринг 0-100.
         4 фактора по 25 баллов макс.
         Бэквордация (spread < 0) получает бонус.
+        OI рост даёт бонус к OI фактору.
         """
         factor_scores = {}
 
-        # ──── 1. OI/MCap (0-25) ────
-        # Лог-рост: 12% → ~12, 25% → ~17, 50% → ~21, 100% → ~24
+        # ──── 1. OI/MCap + OI Growth (0-25) ────
         threshold = config.OI_MCAP_RATIO
         ratio_norm = oi_mcap_ratio / threshold
-        oi_score = min(25.0, 12.0 * math.log2(1 + ratio_norm))
+        oi_score = min(20.0, 10.0 * math.log2(1 + ratio_norm))
 
-        # Бонус за абсолютный OI (если OI > $2M — дополнительно)
+        # Бонус за абсолютный OI
         if oi_usd >= 2_000_000:
-            oi_score = min(25.0, oi_score + 2.0)
+            oi_score = min(22.0, oi_score + 2.0)
         elif oi_usd >= 1_000_000:
-            oi_score = min(25.0, oi_score + 1.0)
+            oi_score = min(22.0, oi_score + 1.0)
+
+        # 🔥 Бонус за рост OI (до +5 баллов)
+        if oi_growth >= 50:
+            oi_score = min(25.0, oi_score + 5.0)
+        elif oi_growth >= 30:
+            oi_score = min(25.0, oi_score + 3.0)
+        elif oi_growth >= 15:
+            oi_score = min(25.0, oi_score + 1.5)
 
         factor_scores["oi"] = round(oi_score, 1)
 
@@ -301,6 +352,9 @@ class StrategyScanner:
             ("mcap_low", "MCap↓"),
             ("oi_ratio_low", "OI/MCap↓"),
             ("oi_usd_low", "OI$↓"),
+            ("oi_growth_low", "OI↑↓"),
+            ("oi_no_data", "OI?"),
+            ("price_pumped", "Pump!"),
             ("volume_low", "Vol↓"),
             ("funding_high", "Fund↑"),
             ("spread_high", "Спред↑"),
@@ -311,6 +365,10 @@ class StrategyScanner:
             val = d[key]
             if val > 0:
                 parts.append(f"{label}:{val}")
+
+        # OI history stats
+        oi_stats = self.oi_history.get_stats()
+        parts.append(f"OI📊:{oi_stats['tracked_symbols']}")
 
         return f"Всего:{total} | " + " | ".join(parts)
 

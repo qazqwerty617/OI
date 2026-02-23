@@ -123,9 +123,9 @@ class TelegramNotifier:
         # Интенсивность
         if signal.score >= 85:
             header = "🔥🔥🔥 УЛЬТРА-СИГНАЛ НА ЛОНГ"
-        elif signal.score >= 70:
+        elif signal.score >= 75:
             header = "🔥🔥 СИЛЬНЫЙ СИГНАЛ НА ЛОНГ"
-        elif signal.score >= 50:
+        elif signal.score >= 60:
             header = "🔥 СИГНАЛ НА ЛОНГ"
         else:
             header = "💊 СИГНАЛ НА ЛОНГ"
@@ -160,17 +160,25 @@ class TelegramNotifier:
             "",
             f"📊 OI/MCap: *{signal.oi_mcap_str}*",
             f"📈 OI: *{signal.oi_str}*",
+            f"🔥 OI рост (10мин): *{signal.oi_growth_str}*",
             f"📉 Funding: *{signal.funding_str}*",
             f"⚖️ Спред: *{signal.spread_str}*",
             f"💎 MCap: *{signal.mcap_str}*",
             f"📦 Volume 24h: *{signal.volume_str}*",
+        ]
+
+        # Показать рост цены (если есть)
+        if signal.price_growth_pct is not None:
+            lines.append(f"💹 Цена за 10мин: *{signal.price_growth_str}*")
+
+        lines.extend([
             "",
             f"💰 Цена: {price_str}",
             "",
             "```",
             factor_bars.rstrip(),
             "```",
-        ]
+        ])
 
         if trade_url:
             lines.append(f"\n[📈 Открыть {signal.exchange_name}]({trade_url})")
@@ -197,11 +205,14 @@ class TelegramNotifier:
             f"*Фильтры:*\n"
             f"• OI/MCap ≥ {config.OI_MCAP_RATIO}%\n"
             f"• OI ≥ ${config.MIN_OI_USD/1e3:.0f}K\n"
+            f"• 🔥 OI рост ≥ {config.MIN_OI_GROWTH_PCT}% за {config.OI_GROWTH_WINDOW//60}мин\n"
+            f"• 🚫 Цена не выросла > {config.MAX_PRICE_PUMP_PCT}%\n"
             f"• Funding ≤ {config.MAX_FUNDING_RATE}%\n"
             f"• Спред ≤ ±{config.MAX_PRICE_SPREAD}%\n"
             f"• MCap {cap_str}\n"
             f"• Volume ≥ ${config.MIN_VOLUME_24H/1e3:.0f}K\n"
             f"• Score ≥ {config.MIN_SIGNAL_SCORE}\n\n"
+            "⚠️ Первые 10 мин сигналов не будет (накопление OI истории)\n"
             "💊 Сканирую..."
         )
         await self._send_with_retry(text)
