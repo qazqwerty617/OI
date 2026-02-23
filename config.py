@@ -28,8 +28,8 @@ OI_MCAP_RATIO = float(os.getenv("OI_MCAP_RATIO", "15.0"))
 MIN_OI_USD = float(os.getenv("MIN_OI_USD", "1000000"))
 
 # --- OI Динамика (перегрев) ---
-# OI должен вырасти на ≥25% за 10 минут → реальный разгон
-MIN_OI_GROWTH_PCT = float(os.getenv("MIN_OI_GROWTH_PCT", "25.0"))
+# OI должен вырасти на ≥30% за 10 минут → реальный разгон
+MIN_OI_GROWTH_PCT = float(os.getenv("MIN_OI_GROWTH_PCT", "30.0"))
 OI_GROWTH_WINDOW = int(os.getenv("OI_GROWTH_WINDOW", "600"))  # 10 мин
 
 # --- Проверка «не опоздали» ---
@@ -51,8 +51,12 @@ BACKWARDATION_BONUS = float(os.getenv("BACKWARDATION_BONUS", "1.5"))
 # MCap >= $5M → только серьёзные проекты
 MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "5000000"))
 
-# MCap верхний лимит (0 = без лимита)
-MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "0"))
+# MCap верхний лимит → лоукапы/мидкапы рокетят сильнее
+MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "500000000"))  # $500M
+
+# --- Волатильность ---
+# Volume/MCap >= 10% → только активные/волатильные монеты
+MIN_VOL_MCAP_RATIO = float(os.getenv("MIN_VOL_MCAP_RATIO", "10.0"))  # %
 
 # --- 24h Volume ---
 # Объём торгов >= $500K → реальная ликвидность
@@ -60,7 +64,12 @@ MIN_VOLUME_24H = float(os.getenv("MIN_VOLUME_24H", "500000"))
 
 # --- Score ---
 # Минимальный score для отправки сигнала (0-100) — только ТОП
-MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "70"))
+MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", "75"))
+
+# --- Rocket Score ---
+# Комбо-детектор шорт-сквиза (0-100)
+# OI рост + негативный фандинг + цена на месте + объём прёт
+MIN_ROCKET_SCORE = int(os.getenv("MIN_ROCKET_SCORE", "55"))
 
 # ═══════════════════════════════════════════
 # Биржи

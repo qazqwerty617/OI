@@ -44,6 +44,7 @@ class Signal:
     volume_24h: float
     oi_growth_pct: Optional[float]
     price_growth_pct: Optional[float]
+    rocket_score: int
     score: int
     factor_scores: Dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
@@ -105,9 +106,9 @@ class StrategyScanner:
     FILTER_NAMES = [
         "no_mcap", "mcap_low", "mcap_high",
         "oi_ratio_low", "oi_usd_low", "oi_growth_low", "oi_no_data",
-        "price_pumped", "volume_low",
+        "price_pumped", "volume_low", "vol_ratio_low",
         "funding_high", "spread_high",
-        "score_low", "cooldown", "passed"
+        "rocket_low", "score_low", "cooldown", "passed"
     ]
 
     def __init__(self):
@@ -143,8 +144,8 @@ class StrategyScanner:
         spot_price = d.get("spot_price")
         volume_24h = d.get("volume_24h", 0) or 0
 
-        # Записываем OI и цену в историю (каждый цикл!)
-        self.oi_history.record(symbol, oi_usd, futures_price)
+        # Записываем OI, цену и объём в историю (каждый цикл!)
+        self.oi_history.record(symbol, oi_usd, futures_price, volume_24h)
 
         # ═══════════════ ФИЛЬТРЫ (жёсткие) ═══════════════
 
@@ -193,11 +194,16 @@ class StrategyScanner:
             self._diag["volume_low"] += 1
             return None
 
-        # 7. Funding rate (опциональный, но если есть — фильтруем)
-        if funding_rate is not None:
-            if funding_rate > config.MAX_FUNDING_RATE:
-                self._diag["funding_high"] += 1
-                return None
+        # 7. 🌋 Волатильность (Volume/MCap) — только активные монеты
+        vol_mcap_ratio = (volume_24h / mcap) * 100
+        if vol_mcap_ratio < config.MIN_VOL_MCAP_RATIO:
+            self._diag["vol_ratio_low"] += 1
+            return None
+
+        # 8. Funding rate — ОБЯЗАТЕЛЬНО отрицательный (шорты платят = сквиз)
+        if funding_rate is None or funding_rate > config.MAX_FUNDING_RATE:
+            self._diag["funding_high"] += 1
+            return None
 
         # 8. Spread
         price_spread = None
@@ -213,12 +219,20 @@ class StrategyScanner:
             oi_growth
         )
 
-        # 9. Score порог
+        # 9. 🚀 Rocket Score — комбо-детектор шорт-сквиза
+        rocket = self.oi_history.get_rocket_score(
+            symbol, oi_growth, price_growth, funding_rate
+        )
+        if rocket < config.MIN_ROCKET_SCORE:
+            self._diag["rocket_low"] += 1
+            return None
+
+        # 10. Score порог
         if score < config.MIN_SIGNAL_SCORE:
             self._diag["score_low"] += 1
             return None
 
-        # 10. Cooldown (по монете, не по бирже — одна монета = один сигнал)
+        # 11. Cooldown (по монете, не по бирже — одна монета = один сигнал)
         cooldown_key = base
         now = time.time()
         if (now - self._cooldowns.get(cooldown_key, 0)) < config.SIGNAL_COOLDOWN:
@@ -246,6 +260,7 @@ class StrategyScanner:
             volume_24h=volume_24h,
             oi_growth_pct=oi_growth,
             price_growth_pct=price_growth,
+            rocket_score=rocket,
             score=score,
             factor_scores=factor_scores,
         )
@@ -356,8 +371,10 @@ class StrategyScanner:
             ("oi_no_data", "OI?"),
             ("price_pumped", "Pump!"),
             ("volume_low", "Vol↓"),
+            ("vol_ratio_low", "V/M↓"),
             ("funding_high", "Fund↑"),
             ("spread_high", "Спред↑"),
+            ("rocket_low", "🚀↓"),
             ("score_low", "Score↓"),
             ("cooldown", "CD"),
             ("passed", "💊"),

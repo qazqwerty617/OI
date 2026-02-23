@@ -1,15 +1,17 @@
 """
-oi_history.py — Трекер динамики OI и цен
+oi_history.py — Трекер динамики OI, цен и объёмов
 
-Хранит снэпшоты OI и цен каждой монеты за последние 15 минут.
-Позволяет определить:
+Хранит снэпшоты каждой монеты за последние 15 минут.
+Определяет:
   1. Рост OI за N минут (перегрев)
   2. Рост цены за N минут (уже поздно?)
+  3. Рост volume за N минут (подтверждение ракеты)
+  4. Rocket Score — комбинация всех факторов
 """
 import time
 import logging
 from collections import defaultdict, deque
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 logger = logging.getLogger("oi_scanner")
 
@@ -19,99 +21,155 @@ MAX_HISTORY_SEC = 900
 
 class OIHistory:
     """
-    Хранит историю OI и цен для каждого символа.
-    Снэпшоты: deque[(timestamp, oi_usd, price)]
+    Хранит историю OI, цен и объёмов для каждого символа.
+    Снэпшоты: deque[(timestamp, oi_usd, price, volume)]
     """
 
     def __init__(self):
-        # symbol -> deque[(ts, oi_usd, price)]
+        # symbol -> deque[(ts, oi_usd, price, volume)]
         self._data: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
 
-    def record(self, symbol: str, oi_usd: float, price: float = 0.0):
-        """Записать текущий снэпшот OI и цены"""
+    def record(self, symbol: str, oi_usd: float, price: float = 0.0, volume: float = 0.0):
+        """Записать текущий снэпшот"""
         now = time.time()
-        self._data[symbol].append((now, oi_usd, price))
+        self._data[symbol].append((now, oi_usd, price, volume))
 
     def record_batch(self, all_data: Dict[str, Dict]):
-        """Записать OI и цены для пачки монет из fetch_all_data"""
+        """Записать данные для пачки монет из fetch_all_data"""
         for symbol, d in all_data.items():
             oi = d.get("oi_usd", 0)
             price = d.get("futures_price", 0)
+            volume = d.get("volume_24h", 0)
             if oi > 0:
-                self.record(symbol, oi, price)
+                self.record(symbol, oi, price, volume)
 
-    def get_growth_pct(self, symbol: str, window_sec: int = 600) -> Optional[float]:
-        """
-        Вернуть % роста OI за последние window_sec секунд.
-        None если недостаточно данных (нет старых записей).
-        """
+    def _get_oldest_in_window(self, symbol: str, window_sec: int):
+        """Найти самый старый снэпшот в пределах окна с минимум 3 мин истории"""
         snapshots = self._data.get(symbol)
         if not snapshots or len(snapshots) < 2:
-            return None
+            return None, None
 
         now = time.time()
-        current_oi = snapshots[-1][1]  # последний OI
+        current = snapshots[-1]
 
         # Ищем самый старый снэпшот в пределах окна
-        oldest_in_window = None
-        for ts, oi, price in snapshots:
-            age = now - ts
+        oldest = None
+        for snap in snapshots:
+            age = now - snap[0]
             if age <= window_sec:
-                oldest_in_window = (ts, oi, price)
-                break  # первый в пределах окна = самый старый
+                oldest = snap
+                break
 
-        if oldest_in_window is None:
+        if oldest is None:
+            return None, None
+
+        # Минимум 3 минуты истории
+        age = now - oldest[0]
+        if age < 180:
+            return None, None
+
+        return oldest, current
+
+    def get_growth_pct(self, symbol: str, window_sec: int = 600) -> Optional[float]:
+        """% роста OI за window_sec секунд"""
+        oldest, current = self._get_oldest_in_window(symbol, window_sec)
+        if oldest is None or current is None:
             return None
 
-        old_oi = oldest_in_window[1]
+        old_oi = oldest[1]
         if old_oi <= 0:
             return None
 
-        # Минимальная "возрастность" данных — хотя бы 3 минуты истории
-        age = now - oldest_in_window[0]
-        if age < 180:  # 3 мин
-            return None
-
-        growth = ((current_oi - old_oi) / old_oi) * 100
-        return growth
+        return ((current[1] - old_oi) / old_oi) * 100
 
     def get_price_growth_pct(self, symbol: str, window_sec: int = 600) -> Optional[float]:
+        """% роста ЦЕНЫ за window_sec секунд"""
+        oldest, current = self._get_oldest_in_window(symbol, window_sec)
+        if oldest is None or current is None:
+            return None
+
+        old_price = oldest[2]
+        if old_price <= 0 or current[2] <= 0:
+            return None
+
+        return ((current[2] - old_price) / old_price) * 100
+
+    def get_volume_growth_pct(self, symbol: str, window_sec: int = 600) -> Optional[float]:
+        """% роста VOLUME за window_sec секунд"""
+        oldest, current = self._get_oldest_in_window(symbol, window_sec)
+        if oldest is None or current is None:
+            return None
+
+        old_vol = oldest[3]
+        if old_vol <= 0 or current[3] <= 0:
+            return None
+
+        return ((current[3] - old_vol) / old_vol) * 100
+
+    def get_rocket_score(self, symbol: str, oi_growth: Optional[float],
+                          price_growth: Optional[float],
+                          funding_rate: Optional[float]) -> int:
         """
-        Вернуть % роста ЦЕНЫ за последние window_sec секунд.
-        Используется для проверки "не опоздали ли мы" — если цена
-        уже выросла на 5%+, то входить поздно.
-        None если недостаточно данных.
+        Rocket Score 0-100: комбинация факторов шорт-сквиза.
+
+        Механика ракеты:
+          - OI растёт быстро (шорты заходят)
+          - Фандинг сильно отрицательный (шорты платят)
+          - Цена ещё на месте или чуть вниз (пружина сжата)
+          - Объём прёт (интерес рынка)
+
+        Чем больше факторов совпадает, тем сильнее ракета.
         """
-        snapshots = self._data.get(symbol)
-        if not snapshots or len(snapshots) < 2:
-            return None
+        score = 0
 
-        now = time.time()
-        current_price = snapshots[-1][2]  # последняя цена
-        if current_price <= 0:
-            return None
+        # 1. OI рост (0-35 баллов)
+        if oi_growth is not None:
+            if oi_growth >= 80:
+                score += 35
+            elif oi_growth >= 50:
+                score += 30
+            elif oi_growth >= 35:
+                score += 25
+            elif oi_growth >= 25:
+                score += 20
+            elif oi_growth >= 15:
+                score += 10
 
-        # Ищем самый старый снэпшот в пределах окна
-        oldest_in_window = None
-        for ts, oi, price in snapshots:
-            age = now - ts
-            if age <= window_sec:
-                oldest_in_window = (ts, oi, price)
-                break
+        # 2. Негативный фандинг = шорты (0-30 баллов)
+        if funding_rate is not None:
+            if funding_rate <= -0.5:
+                score += 30  # Экстрим — шорты ДИКО платят
+            elif funding_rate <= -0.2:
+                score += 25
+            elif funding_rate <= -0.1:
+                score += 20
+            elif funding_rate <= -0.05:
+                score += 15
+            elif funding_rate <= -0.01:
+                score += 10
 
-        if oldest_in_window is None:
-            return None
+        # 3. Цена на месте/чуть вниз = пружина (0-20 баллов)
+        if price_growth is not None:
+            if -2.0 <= price_growth <= 0.5:
+                score += 20  # Идеал: цена стоит или чуть просела
+            elif -3.0 <= price_growth <= 1.0:
+                score += 15
+            elif -5.0 <= price_growth <= 2.0:
+                score += 10
+            elif price_growth <= -5.0:
+                score += 5  # Слишком сильно упала — опасно
 
-        old_price = oldest_in_window[2]
-        if old_price <= 0:
-            return None
+        # 4. Volume рост (0-15 баллов)
+        vol_growth = self.get_volume_growth_pct(symbol)
+        if vol_growth is not None:
+            if vol_growth >= 30:
+                score += 15
+            elif vol_growth >= 15:
+                score += 10
+            elif vol_growth >= 5:
+                score += 5
 
-        age = now - oldest_in_window[0]
-        if age < 180:  # 3 мин
-            return None
-
-        growth = ((current_price - old_price) / old_price) * 100
-        return growth
+        return min(100, score)
 
     def cleanup(self):
         """Удалить записи старше MAX_HISTORY_SEC"""

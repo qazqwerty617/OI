@@ -121,14 +121,14 @@ class TelegramNotifier:
             return
 
         # Интенсивность
-        if signal.score >= 85:
-            header = "🔥🔥🔥 УЛЬТРА-СИГНАЛ НА ЛОНГ"
-        elif signal.score >= 75:
-            header = "🔥🔥 СИЛЬНЫЙ СИГНАЛ НА ЛОНГ"
-        elif signal.score >= 60:
-            header = "🔥 СИГНАЛ НА ЛОНГ"
+        if signal.rocket_score >= 80:
+            header = "🚀🚀🚀 РАКЕТА НА ЛОНГ"
+        elif signal.rocket_score >= 60:
+            header = "🚀🚀 СИЛЬНЫЙ СИГНАЛ"
+        elif signal.rocket_score >= 40:
+            header = "🚀 СИГНАЛ НА ЛОНГ"
         else:
-            header = "💊 СИГНАЛ НА ЛОНГ"
+            header = "💊 СИГНАЛ"
 
         # Бэквордация?
         backwardation = ""
@@ -156,7 +156,7 @@ class TelegramNotifier:
             f"*{header}*{backwardation}",
             f"*{signal.base}/USDT* — {signal.exchange_name}",
             "",
-            f"🎯 *Score: {signal.score}/100*",
+            f"🎯 *Score: {signal.score}/100* | 🚀 *Rocket: {signal.rocket_score}/100*",
             "",
             f"📊 OI/MCap: *{signal.oi_mcap_str}*",
             f"📈 OI: *{signal.oi_str}*",
