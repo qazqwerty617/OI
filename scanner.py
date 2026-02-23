@@ -218,8 +218,8 @@ class StrategyScanner:
             self._diag["score_low"] += 1
             return None
 
-        # 10. Cooldown
-        cooldown_key = f"{base}_{d['exchange']}"
+        # 10. Cooldown (по монете, не по бирже — одна монета = один сигнал)
+        cooldown_key = base
         now = time.time()
         if (now - self._cooldowns.get(cooldown_key, 0)) < config.SIGNAL_COOLDOWN:
             self._diag["cooldown"] += 1

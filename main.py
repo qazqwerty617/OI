@@ -247,8 +247,16 @@ class OIScannerBot:
                 all_signals.extend(r)
         all_signals.sort(key=lambda s: s.score, reverse=True)
 
+        # Дедупликация: одна монета = один сигнал (лучшая биржа)
+        seen_bases = set()
+        deduped = []
+        for sig in all_signals:
+            if sig.base not in seen_bases:
+                seen_bases.add(sig.base)
+                deduped.append(sig)
+
         # ТОП-1 лучший за цикл
-        top_signals = all_signals[:1]
+        top_signals = deduped[:1]
 
         # Отправляем + трекинг
         for signal in top_signals:
